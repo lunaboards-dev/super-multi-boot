@@ -1,0 +1,7 @@
+addboot(0, function(drive)
+	local fs = cproxy(drive)
+	local hand = lassert(fs.open(".bootmenu", "r"))
+	load_data(readfile(fs, hand))
+end, function(data)
+	return b2a(data)
+end)
