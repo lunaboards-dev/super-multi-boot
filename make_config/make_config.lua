@@ -1,3 +1,4 @@
+local arg = arg or {...}
 local function a2b(addr)
 	addr = string.gsub(addr, "%-", "")
 	local baddr = ""
