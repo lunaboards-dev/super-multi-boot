@@ -7,10 +7,10 @@ _BIOS=ourname -- both like classic zorya and zorya neo
 -- our basic info
 _SMB = {
 	version = "0.1-alpha",
-	git = "$[[git rev-parse --short HEAD]]"
+	git = "671dab5"
 }
 
-@[[if svar.get("BUILD") ~= "release" then]]
+
 local function debug_print(...)
 	local t = tab.pack(...)
 	for i=1, #t do
@@ -18,9 +18,7 @@ local function debug_print(...)
 	end
 	cinvoke(clist("ocemu")(), "log", tab.concat(t, "\t"))
 end
-@[[else]]
-local function debug_print()end
-@[[end]]
+
 local function a2b(addr)
 	addr = sgsub(addr, "%-", empty)
 	local baddr = empty
@@ -121,13 +119,180 @@ end)
 
 -- insert handlers here
 
---#include "src/extended.lua"
---#include "src/bios.lua"
---#include "src/file.lua"
---#include "src/text.lua"
---#include "src/config.lua"
---#include "src/osdi.lua"
---#include "src/net.lua"
+local loaded_menus = {}
+
+local function load_smbmenu(drive)
+	if loaded_menus[drive] then return end
+	local fs = cproxy(drive)
+	local hand = lassert(fs.open(".smbmenu", "r"))
+	load_data(readfile(fs, hand))
+	loaded_menus[drive] = true
+end
+
+local function loadall()
+	for fs in clist("filesystem") do
+		if cinvoke(fs, "exists", ".smbmenu") then
+			load_smbmenu(fs)
+		end
+	end
+end
+
+addconfig("loadall", function(v)
+	if (v ~= "0") then
+		loadall()
+	end
+end)
+
+addconfig(0x0000, function(v)
+	if (sbyte(v) > 0) then
+		loadall()
+	end
+end)
+
+addboot(0, function(drive)
+	load_smbmenu(drive)
+end, function(data)
+	return
+end)
+addboot(1, function(drive)
+	local fs = cproxy(drive)
+	local hand = lassert(fs.open("init.lua", "r"))
+	function com.getBootAddress()
+		return drive
+	end
+	function com.setBootAddress()end
+	assert(lload(lassert(readfile(fs, hand))))()
+end, function(data)
+	return b2a(data)
+end)
+addboot(2, function(drive, file)
+	local fs = cproxy(drive)
+	local hand = lassert(fs.open(file, "r"))
+	function comp.getBootAddress()
+		return drive
+	end
+	function comp.setBootAddress()end
+	assert(lload(lassert(readfile(fs, hand))))()
+end, function(data)
+	return b2a(data), data:sub(17)
+end)
+addboot(3, function()
+end, function(data)
+	return true
+end)
+addboot(4, function()
+end, function(data)
+	local k, v = data:match("(.+)=(.+)")
+	cfgset(k, v)
+end)
+
+addboot(7, function()
+end, function(data)
+	local opt = sunpack(leshort, data)
+	cfgset(opt, ssub(data, 3))
+end)
+-- only supports OSDI version 2+
+local osdi_header = "<IIc8I3c13"
+
+local function is_osdi(data)
+	local blksize, version, zero, magic, uuid = sunpack("<BI3Ic8c16", data)
+	if (magic ~= "osdiPLUS" or version ~= 2 or zero ~= 0 or 1 << blksize ~= 512) then return false end
+	return b2a(uuid)
+end
+
+local osdi_map = {}
+
+local function parse_osdi(data, part)
+	local offset = (spacksize(osdi_header)*drive)+1
+	return sunpack(osdi_header, ssub(data, offset, offset+spacksize(osdi_header)-1))
+end
+
+for drv in clist("drive") do
+	local prx = cproxy(drv)
+	local first = prox.readSector(1)
+	local addr = is_osdi(first)
+	if addr then
+		local parts = {}
+		osdi_map[addr] = parts
+		parts.proxy = prx
+		for i=1, 15 do
+			local start, size, ptype, flags, name = parse_osdi(first, i)
+			parts[i] = {start,size,ptype,flags,name}
+		end
+	end
+end
+
+local function get_osdi_drive(addr)
+	return osdi_map[addr].proxy
+end
+
+local function load_part(addr, part)
+	local pdat, proxy = osdi_map[addr][part], osdi_map[addr].proxy
+	local start, size = pdat[1], pdat[2]
+	local data = empty
+	for i=1, size do
+		data = data .. proxy.readSector(start+i-1)
+	end
+	return data
+end
+
+local function psub(data)
+	return ssub(data, 2, 1+sunpack(leshort, data))
+end
+
+local function osdi_scan()
+	for k, v in pairs(osdi_map) do
+		for i=1, #v do
+			local ent = v[i]
+			if ent[3] == "$SMBMENU" then
+				load_data(psub(load_part(k, i)))
+			end
+		end
+	end
+end
+
+addconfig("osdiscan", function(v)
+	if (v ~= "0") then
+		osdi_scan()
+	end
+end)
+
+addconfig(0x0600, function(dat)
+	if (sbyte(v) > 0) then
+		osdi_scan()
+	end
+end)
+
+addboot(5, function(drive, partition)
+	load_data(psub(load_part(drive, partition)))
+end, function(data)
+	return b2a(data), ssub(data, 17)
+end)
+
+addboot(6, function(drive, partition)
+	load(psub(load_part(drive, partition)), sformat("osdi(%s..., %i)", drive:sub(1, 3), partition))()
+end, function(data)
+	return b2a(data), ssub(data, 17)
+end)
+do
+	local inet = clist("internet")()
+	local prox
+	if inet then
+		prox = cproxy(inet)
+	end
+	addboot(8, function()
+	end, function(data)
+		local req = establish_connection(prox, data)
+		load_data(getdata(req))
+	end)
+
+	addboot(9, function(addr)
+		local req = establish_connection(prox, addr)
+		load(getdata(req), "="..addr)()
+	end, function(data)
+		return data
+	end)
+end
 
 -- all handlers inserted
 debug_print("loading configuration data...")

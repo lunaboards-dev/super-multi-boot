@@ -1,0 +1,11 @@
+addboot(4, function()
+end, function(data)
+	local k, v = data:match("(.+)=(.+)")
+	cfgset(k, v)
+end)
+
+addboot(7, function()
+end, function(data)
+	local opt = sunpack(leshort, data)
+	cfgset(opt, ssub(data, 3))
+end)
