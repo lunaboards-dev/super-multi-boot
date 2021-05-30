@@ -16,7 +16,7 @@ end
 
 for drv in clist("drive") do
 	local prx = cproxy(drv)
-	local first = prox.readSector(1)
+	local first = prx.readSector(1)
 	local addr = is_osdi(first)
 	if addr then
 		local parts = {}
